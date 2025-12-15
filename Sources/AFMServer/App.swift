@@ -5,10 +5,12 @@ struct AFMServerApp: App {
     @StateObject private var serverManager = ServerManager()
 
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        MenuBarExtra {
+            MenuBarView()
                 .environmentObject(serverManager)
+        } label: {
+            Image(systemName: serverManager.isRunning ? "brain.fill" : "brain")
         }
-        .windowResizability(.contentSize)
+        .menuBarExtraStyle(.window)
     }
 }
