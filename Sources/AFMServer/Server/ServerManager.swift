@@ -116,13 +116,15 @@ class ServerManager: ObservableObject {
             return .error(400, "Invalid request body")
         }
 
-        // Generate response
-        let responseText = await llmClient.generateResponse(messages: chatRequest.messages)
+        let config = GenerationConfig(from: chatRequest)
 
         // Check for streaming
         if chatRequest.stream == true {
-            return buildStreamingResponse(responseText: responseText)
+            return await buildStreamingResponse(messages: chatRequest.messages, config: config, llmClient: llmClient)
         }
+
+        // Generate response
+        let responseText = await llmClient.generateResponse(messages: chatRequest.messages, config: config)
 
         // Non-streaming response
         let chatResponse = ChatCompletionResponse(
@@ -151,32 +153,42 @@ class ServerManager: ObservableObject {
         return .error(500, "Failed to encode response")
     }
 
-    private static func buildStreamingResponse(responseText: String) -> HTTPResponse {
+    private static func buildStreamingResponse(
+        messages: [ChatMessage],
+        config: GenerationConfig,
+        llmClient: FoundationModelsClient
+    ) async -> HTTPResponse {
         let responseId = "chatcmpl-\(UUID().uuidString.prefix(8))"
         var body = ""
-        let words = responseText.split(separator: " ")
+        var isFirst = true
+        let stream = llmClient.generateResponseStream(messages: messages, config: config)
 
-        for (index, word) in words.enumerated() {
-            let chunk = ChatCompletionChunk(
-                id: responseId,
-                object: "chat.completion.chunk",
-                created: Int(Date().timeIntervalSince1970),
-                model: "apple-on-device",
-                choices: [
-                    ChunkChoice(
-                        index: 0,
-                        delta: ChunkDelta(
-                            role: index == 0 ? "assistant" : nil,
-                            content: String(word) + (index < words.count - 1 ? " " : "")
-                        ),
-                        finishReason: nil
-                    )
-                ]
-            )
-            if let chunkData = try? JSONEncoder().encode(chunk),
-               let chunkJson = String(data: chunkData, encoding: .utf8) {
-                body += "data: \(chunkJson)\n\n"
+        do {
+            for try await chunk in stream {
+                let chunkResponse = ChatCompletionChunk(
+                    id: responseId,
+                    object: "chat.completion.chunk",
+                    created: Int(Date().timeIntervalSince1970),
+                    model: "apple-on-device",
+                    choices: [
+                        ChunkChoice(
+                            index: 0,
+                            delta: ChunkDelta(
+                                role: isFirst ? "assistant" : nil,
+                                content: chunk
+                            ),
+                            finishReason: nil
+                        )
+                    ]
+                )
+                if let chunkData = try? JSONEncoder().encode(chunkResponse),
+                   let chunkJson = String(data: chunkData, encoding: .utf8) {
+                    body += "data: \(chunkJson)\n\n"
+                }
+                isFirst = false
             }
+        } catch {
+            return .error(500, "Streaming error: \(error.localizedDescription)")
         }
 
         // Final chunk

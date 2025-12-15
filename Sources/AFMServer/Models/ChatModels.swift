@@ -1,5 +1,19 @@
 import Foundation
 
+// MARK: - Generation Config
+
+struct GenerationConfig {
+    let temperature: Double?
+    let maxTokens: Int?
+    let systemPrompt: String?
+
+    init(from request: ChatCompletionRequest) {
+        self.temperature = request.temperature
+        self.maxTokens = request.maxTokens
+        self.systemPrompt = request.messages.first(where: { $0.role == "system" })?.content
+    }
+}
+
 // MARK: - Request Types
 
 struct ChatCompletionRequest: Codable {
