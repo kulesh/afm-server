@@ -88,7 +88,7 @@ actor FoundationModelsClient {
         // Scale OpenAI temperature (0-2) to Apple's range (0-1)
         let temp = config.temperature.map { max(0.0, min(1.0, $0 / 2.0)) }
 
-        if temp == 0 {
+        if let t = temp, t == 0 {
             return GenerationOptions(
                 sampling: .greedy,
                 temperature: 0,
