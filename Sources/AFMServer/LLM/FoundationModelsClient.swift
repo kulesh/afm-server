@@ -1,113 +1,103 @@
 import Foundation
-
-// NOTE: This file requires macOS 26 (Tahoe) and the FoundationModels framework.
-// When building with Xcode 26 on macOS 26, uncomment the FoundationModels import
-// and replace the placeholder implementation with the actual framework calls.
-
-// import FoundationModels
+import FoundationModels
 
 actor FoundationModelsClient {
+    private var session: LanguageModelSession?
 
     // MARK: - Model Availability
 
     func isModelAvailable() async -> Bool {
-        // TODO: Replace with actual FoundationModels check
-        // return await SystemLanguageModel.default.isAvailable
-
-        // Placeholder: return true for development
-        #if DEBUG
-        return true
-        #else
-        return false
-        #endif
+        do {
+            let availability = SystemLanguageModel.default.availability
+            switch availability {
+            case .available:
+                return true
+            case .unavailable:
+                return false
+            @unknown default:
+                return false
+            }
+        }
     }
 
     // MARK: - Text Generation
 
     func generateResponse(messages: [ChatMessage]) async -> String {
-        // TODO: Replace with actual FoundationModels implementation
-        /*
         do {
-            let session = LanguageModelSession()
+            // Create session if needed
+            if session == nil {
+                session = LanguageModelSession()
+            }
+
+            guard let session = session else {
+                return "Error: Could not create language model session"
+            }
 
             // Build prompt from messages
-            var prompt = ""
-            for message in messages {
-                switch message.role {
-                case "system":
-                    prompt += "System: \(message.content ?? "")\n"
-                case "user":
-                    prompt += "User: \(message.content ?? "")\n"
-                case "assistant":
-                    prompt += "Assistant: \(message.content ?? "")\n"
-                default:
-                    prompt += "\(message.content ?? "")\n"
-                }
-            }
-            prompt += "Assistant:"
+            let prompt = buildPrompt(from: messages)
 
+            // Generate response
             let response = try await session.respond(to: prompt)
             return response.content
+
         } catch {
             return "Error: \(error.localizedDescription)"
         }
-        */
-
-        // Placeholder implementation for development/testing
-        let lastUserMessage = messages.last { $0.role == "user" }?.content ?? "Hello"
-        return "This is a placeholder response from AFM Server. You said: \"\(lastUserMessage)\". " +
-               "To use Apple's actual on-device model, build and run on macOS 26 with Apple Intelligence enabled."
     }
 
     // MARK: - Streaming Generation
 
-    func generateResponseStream(messages: [ChatMessage]) -> AsyncStream<String> {
-        // TODO: Replace with actual FoundationModels streaming
-        /*
-        return AsyncStream { continuation in
+    func generateResponseStream(messages: [ChatMessage]) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
             Task {
                 do {
-                    let session = LanguageModelSession()
+                    if session == nil {
+                        session = LanguageModelSession()
+                    }
 
-                    // Build prompt from messages
-                    var prompt = ""
-                    for message in messages {
-                        switch message.role {
-                        case "system":
-                            prompt += "System: \(message.content ?? "")\n"
-                        case "user":
-                            prompt += "User: \(message.content ?? "")\n"
-                        case "assistant":
-                            prompt += "Assistant: \(message.content ?? "")\n"
-                        default:
-                            prompt += "\(message.content ?? "")\n"
+                    guard let session = session else {
+                        continuation.finish(throwing: NSError(domain: "AFMServer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not create session"]))
+                        return
+                    }
+
+                    let prompt = buildPrompt(from: messages)
+                    var lastContent = ""
+
+                    for try await snapshot in session.streamResponse(to: prompt) {
+                        // Extract the new content since last snapshot
+                        let currentContent = snapshot.content
+                        if currentContent.count > lastContent.count {
+                            let newContent = String(currentContent.dropFirst(lastContent.count))
+                            continuation.yield(newContent)
+                            lastContent = currentContent
                         }
                     }
-                    prompt += "Assistant:"
-
-                    for try await chunk in session.streamResponse(to: prompt) {
-                        continuation.yield(chunk)
-                    }
                     continuation.finish()
+
                 } catch {
-                    continuation.yield("Error: \(error.localizedDescription)")
-                    continuation.finish()
+                    continuation.finish(throwing: error)
                 }
             }
         }
-        */
+    }
 
-        // Placeholder implementation
-        return AsyncStream { continuation in
-            Task {
-                let response = await self.generateResponse(messages: messages)
-                let words = response.split(separator: " ")
-                for word in words {
-                    continuation.yield(String(word) + " ")
-                    try? await Task.sleep(nanoseconds: 50_000_000) // 50ms delay
-                }
-                continuation.finish()
+    // MARK: - Private
+
+    private func buildPrompt(from messages: [ChatMessage]) -> String {
+        var prompt = ""
+        for message in messages {
+            guard let content = message.content else { continue }
+            switch message.role {
+            case "system":
+                prompt += "System: \(content)\n\n"
+            case "user":
+                prompt += "User: \(content)\n\n"
+            case "assistant":
+                prompt += "Assistant: \(content)\n\n"
+            default:
+                prompt += "\(content)\n\n"
             }
         }
+        return prompt.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

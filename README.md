@@ -14,7 +14,7 @@ A minimal Swift daemon that exposes Apple's on-device Foundation Models via an O
 - macOS 26 (Tahoe) or later
 - Apple Silicon (M1 or later)
 - Apple Intelligence enabled (Settings → Apple Intelligence & Siri)
-- Xcode 26 or later (for building from source)
+- Swift 6.2+ / Xcode 26 or later (for building from source)
 
 ## API Endpoints
 

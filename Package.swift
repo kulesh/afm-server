@@ -1,10 +1,10 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 import PackageDescription
 
 let package = Package(
     name: "AFMServer",
     platforms: [
-        .macOS(.v15)  // Will need macOS 26 for FoundationModels, but set v15 for now
+        .macOS(.v26)
     ],
     products: [
         .executable(name: "afm-server", targets: ["AFMServer"])
