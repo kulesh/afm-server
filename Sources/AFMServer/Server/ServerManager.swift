@@ -14,6 +14,8 @@ actor RequestCounter {
 
 @MainActor
 class ServerManager: ObservableObject {
+    static let shared = ServerManager()
+
     @Published var isRunning = false
     @Published var modelAvailable = false
     @Published var requestCount = 0

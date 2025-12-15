@@ -74,10 +74,6 @@ struct MenuBarView: View {
         }
         .padding(12)
         .frame(width: 260)
-        .onAppear {
-            serverManager.checkModelAvailability()
-            serverManager.start()
-        }
     }
 }
 
