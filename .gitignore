@@ -1,0 +1,19 @@
+# Build artifacts
+.build/
+.swiftpm/
+DerivedData/
+
+# Xcode
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+
+# macOS
+.DS_Store
+
+# IDE
+*.idea/
+*.vscode/
+
+# Package resolved (optional - uncomment if you want to lock dependencies)
+# Package.resolved
