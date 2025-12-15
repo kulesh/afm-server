@@ -3,6 +3,7 @@ import FoundationModels
 
 actor FoundationModelsClient {
     private var session: LanguageModelSession?
+    private var currentInstructions: String?
 
     // MARK: - Model Availability
 
@@ -22,22 +23,13 @@ actor FoundationModelsClient {
 
     // MARK: - Text Generation
 
-    func generateResponse(messages: [ChatMessage]) async -> String {
+    func generateResponse(messages: [ChatMessage], config: GenerationConfig? = nil) async -> String {
         do {
-            // Create session if needed
-            if session == nil {
-                session = LanguageModelSession()
-            }
+            let session = getSession(instructions: config?.systemPrompt)
+            let prompt = buildPrompt(from: messages, excludeSystem: config?.systemPrompt != nil)
+            let options = buildGenerationOptions(from: config)
 
-            guard let session = session else {
-                return "Error: Could not create language model session"
-            }
-
-            // Build prompt from messages
-            let prompt = buildPrompt(from: messages)
-
-            // Generate response
-            let response = try await session.respond(to: prompt)
+            let response = try await session.respond(to: prompt, options: options)
             return response.content
 
         } catch {
@@ -47,24 +39,16 @@ actor FoundationModelsClient {
 
     // MARK: - Streaming Generation
 
-    func generateResponseStream(messages: [ChatMessage]) -> AsyncThrowingStream<String, Error> {
+    nonisolated func generateResponseStream(messages: [ChatMessage], config: GenerationConfig? = nil) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             Task {
                 do {
-                    if session == nil {
-                        session = LanguageModelSession()
-                    }
-
-                    guard let session = session else {
-                        continuation.finish(throwing: NSError(domain: "AFMServer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not create session"]))
-                        return
-                    }
-
-                    let prompt = buildPrompt(from: messages)
+                    let session = await self.getSession(instructions: config?.systemPrompt)
+                    let prompt = await self.buildPrompt(from: messages, excludeSystem: config?.systemPrompt != nil)
+                    let options = await self.buildGenerationOptions(from: config)
                     var lastContent = ""
 
-                    for try await snapshot in session.streamResponse(to: prompt) {
-                        // Extract the new content since last snapshot
+                    for try await snapshot in session.streamResponse(to: prompt, options: options) {
                         let currentContent = snapshot.content
                         if currentContent.count > lastContent.count {
                             let newContent = String(currentContent.dropFirst(lastContent.count))
@@ -83,10 +67,46 @@ actor FoundationModelsClient {
 
     // MARK: - Private
 
-    private func buildPrompt(from messages: [ChatMessage]) -> String {
+    private func getSession(instructions: String?) -> LanguageModelSession {
+        if session == nil || currentInstructions != instructions {
+            if let instructions = instructions, !instructions.isEmpty {
+                session = LanguageModelSession(instructions: instructions)
+            } else {
+                session = LanguageModelSession()
+            }
+            currentInstructions = instructions
+        }
+        return session!
+    }
+
+    private func buildGenerationOptions(from config: GenerationConfig?) -> GenerationOptions {
+        guard let config = config,
+              config.temperature != nil || config.maxTokens != nil else {
+            return GenerationOptions()
+        }
+
+        // Scale OpenAI temperature (0-2) to Apple's range (0-1)
+        let temp = config.temperature.map { max(0.0, min(1.0, $0 / 2.0)) }
+
+        if let t = temp, t == 0 {
+            return GenerationOptions(
+                sampling: .greedy,
+                temperature: 0,
+                maximumResponseTokens: config.maxTokens
+            )
+        }
+
+        return GenerationOptions(
+            temperature: temp,
+            maximumResponseTokens: config.maxTokens
+        )
+    }
+
+    private func buildPrompt(from messages: [ChatMessage], excludeSystem: Bool = false) -> String {
         var prompt = ""
         for message in messages {
             guard let content = message.content else { continue }
+            if excludeSystem && message.role == "system" { continue }
             switch message.role {
             case "system":
                 prompt += "System: \(content)\n\n"
