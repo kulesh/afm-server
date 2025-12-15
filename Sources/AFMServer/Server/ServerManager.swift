@@ -1,6 +1,5 @@
 import Foundation
 import SwiftUI
-import Hummingbird
 
 // Thread-safe request counter using actor
 actor RequestCounter {
@@ -18,58 +17,51 @@ class ServerManager: ObservableObject {
     @Published var isRunning = false
     @Published var modelAvailable = false
     @Published var requestCount = 0
-    @Published var port: Int = 11535
+    @Published var port: UInt16 = 11535
 
-    private var serverTask: Task<Void, Error>?
+    private var server: HTTPServer?
     private let llmClient = FoundationModelsClient()
     private let requestCounter = RequestCounter()
 
     func start() {
         guard !isRunning else { return }
 
-        let currentPort = port
         let client = llmClient
         let counter = requestCounter
 
-        serverTask = Task.detached {
+        server = HTTPServer(port: port) { request in
+            await counter.increment()
+            return await Self.handleRequest(request, llmClient: client)
+        }
+
+        Task { @MainActor [weak self] in
             do {
-                let router = AFMRouter.build(llmClient: client, requestCounter: counter)
-                let app = Application(
-                    router: router,
-                    configuration: .init(
-                        address: .hostname("127.0.0.1", port: currentPort)
-                    )
-                )
-
-                await MainActor.run {
-                    self.isRunning = true
-                }
-
-                print("AFM Server starting on http://127.0.0.1:\(currentPort)")
-                try await app.run()
+                try await self?.server?.start()
             } catch {
                 print("Server error: \(error)")
-                await MainActor.run {
-                    self.isRunning = false
-                }
+                self?.isRunning = false
             }
         }
 
         // Poll request count
         Task {
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 500_000_000) // 500ms
+            while !Task.isCancelled && server != nil {
+                try? await Task.sleep(nanoseconds: 500_000_000)
                 let count = await counter.count
                 if count != requestCount {
                     requestCount = count
                 }
             }
         }
+
+        isRunning = true
     }
 
     func stop() {
-        serverTask?.cancel()
-        serverTask = nil
+        Task {
+            await server?.stop()
+        }
+        server = nil
         isRunning = false
         print("AFM Server stopped")
     }
@@ -82,24 +74,15 @@ class ServerManager: ObservableObject {
             }
         }
     }
-}
 
-// Separate struct for building routes (not MainActor-isolated)
-enum AFMRouter {
-    static func build(llmClient: FoundationModelsClient, requestCounter: RequestCounter) -> Router<BasicRequestContext> {
-        let router = Router()
+    // MARK: - Request Handling
 
-        // Health check
-        router.get("/health") { _, _ in
-            return Response(
-                status: .ok,
-                headers: [.contentType: "application/json"],
-                body: .init(byteBuffer: ByteBuffer(string: #"{"status":"ok"}"#))
-            )
-        }
+    private static func handleRequest(_ request: HTTPRequest, llmClient: FoundationModelsClient) async -> HTTPResponse {
+        switch (request.method, request.path) {
+        case ("GET", "/health"):
+            return .ok(json: #"{"status":"ok"}"#)
 
-        // List models
-        router.get("/v1/models") { _, _ in
+        case ("GET", "/v1/models"):
             let response = ModelsResponse(
                 object: "list",
                 data: [
@@ -111,62 +94,62 @@ enum AFMRouter {
                     )
                 ]
             )
-            let data = try JSONEncoder().encode(response)
-            return Response(
-                status: .ok,
-                headers: [.contentType: "application/json"],
-                body: .init(byteBuffer: ByteBuffer(data: data))
-            )
-        }
-
-        // Chat completions
-        router.post("/v1/chat/completions") { request, _ in
-            await requestCounter.increment()
-
-            // Parse request body
-            let body = try await request.body.collect(upTo: 1024 * 1024) // 1MB limit
-            let chatRequest = try JSONDecoder().decode(ChatCompletionRequest.self, from: body)
-
-            // Generate response
-            let responseText = await llmClient.generateResponse(messages: chatRequest.messages)
-
-            // Check for streaming
-            if chatRequest.stream == true {
-                return try buildStreamingResponse(responseText: responseText)
+            if let data = try? JSONEncoder().encode(response),
+               let json = String(data: data, encoding: .utf8) {
+                return .ok(json: json)
             }
+            return .error(500, "Failed to encode response")
 
-            // Non-streaming response
-            let chatResponse = ChatCompletionResponse(
-                id: "chatcmpl-\(UUID().uuidString.prefix(8))",
-                object: "chat.completion",
-                created: Int(Date().timeIntervalSince1970),
-                model: "apple-on-device",
-                choices: [
-                    ChatChoice(
-                        index: 0,
-                        message: ChatMessage(role: "assistant", content: responseText),
-                        finishReason: "stop"
-                    )
-                ],
-                usage: UsageInfo(
-                    promptTokens: chatRequest.messages.reduce(0) { $0 + ($1.content?.count ?? 0) / 4 },
-                    completionTokens: responseText.count / 4,
-                    totalTokens: (chatRequest.messages.reduce(0) { $0 + ($1.content?.count ?? 0) } + responseText.count) / 4
-                )
-            )
+        case ("POST", "/v1/chat/completions"):
+            return await handleChatCompletion(request, llmClient: llmClient)
 
-            let data = try JSONEncoder().encode(chatResponse)
-            return Response(
-                status: .ok,
-                headers: [.contentType: "application/json"],
-                body: .init(byteBuffer: ByteBuffer(data: data))
-            )
+        default:
+            return .error(404, "Not Found")
         }
-
-        return router
     }
 
-    private static func buildStreamingResponse(responseText: String) throws -> Response {
+    private static func handleChatCompletion(_ request: HTTPRequest, llmClient: FoundationModelsClient) async -> HTTPResponse {
+        guard let body = request.body,
+              let chatRequest = try? JSONDecoder().decode(ChatCompletionRequest.self, from: body) else {
+            return .error(400, "Invalid request body")
+        }
+
+        // Generate response
+        let responseText = await llmClient.generateResponse(messages: chatRequest.messages)
+
+        // Check for streaming
+        if chatRequest.stream == true {
+            return buildStreamingResponse(responseText: responseText)
+        }
+
+        // Non-streaming response
+        let chatResponse = ChatCompletionResponse(
+            id: "chatcmpl-\(UUID().uuidString.prefix(8))",
+            object: "chat.completion",
+            created: Int(Date().timeIntervalSince1970),
+            model: "apple-on-device",
+            choices: [
+                ChatChoice(
+                    index: 0,
+                    message: ChatMessage(role: "assistant", content: responseText),
+                    finishReason: "stop"
+                )
+            ],
+            usage: UsageInfo(
+                promptTokens: chatRequest.messages.reduce(0) { $0 + ($1.content?.count ?? 0) / 4 },
+                completionTokens: responseText.count / 4,
+                totalTokens: (chatRequest.messages.reduce(0) { $0 + ($1.content?.count ?? 0) } + responseText.count) / 4
+            )
+        )
+
+        if let data = try? JSONEncoder().encode(chatResponse),
+           let json = String(data: data, encoding: .utf8) {
+            return .ok(json: json)
+        }
+        return .error(500, "Failed to encode response")
+    }
+
+    private static func buildStreamingResponse(responseText: String) -> HTTPResponse {
         let responseId = "chatcmpl-\(UUID().uuidString.prefix(8))"
         var body = ""
         let words = responseText.split(separator: " ")
@@ -188,8 +171,10 @@ enum AFMRouter {
                     )
                 ]
             )
-            let chunkData = try JSONEncoder().encode(chunk)
-            body += "data: \(String(data: chunkData, encoding: .utf8) ?? "")\n\n"
+            if let chunkData = try? JSONEncoder().encode(chunk),
+               let chunkJson = String(data: chunkData, encoding: .utf8) {
+                body += "data: \(chunkJson)\n\n"
+            }
         }
 
         // Final chunk
@@ -206,18 +191,12 @@ enum AFMRouter {
                 )
             ]
         )
-        let finalData = try JSONEncoder().encode(finalChunk)
-        body += "data: \(String(data: finalData, encoding: .utf8) ?? "")\n\n"
+        if let finalData = try? JSONEncoder().encode(finalChunk),
+           let finalJson = String(data: finalData, encoding: .utf8) {
+            body += "data: \(finalJson)\n\n"
+        }
         body += "data: [DONE]\n\n"
 
-        return Response(
-            status: .ok,
-            headers: [
-                .contentType: "text/event-stream",
-                .cacheControl: "no-cache",
-                .init("Connection")!: "keep-alive"
-            ],
-            body: .init(byteBuffer: ByteBuffer(string: body))
-        )
+        return .ok(json: body, streaming: true)
     }
 }

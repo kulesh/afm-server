@@ -24,7 +24,7 @@ struct MenuBarView: View {
                     HStack {
                         Text("Endpoint:")
                             .foregroundColor(.secondary)
-                        Text("http://127.0.0.1:\(serverManager.port)")
+                        Text("http://127.0.0.1:\(Int(serverManager.port))")
                             .font(.system(.body, design: .monospaced))
                             .textSelection(.enabled)
                     }
