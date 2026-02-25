@@ -146,12 +146,15 @@ actor FoundationModelsClient {
     }
 
     private func combineInstructions(systemPrompt: String?, toolInstructions: String?) -> String? {
-        let parts = [systemPrompt, toolInstructions]
-            .compactMap { value in
-                guard let value else { return nil }
-                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                return trimmed.isEmpty ? nil : trimmed
+        let candidates: [String?] = [systemPrompt, toolInstructions]
+        var parts: [String] = []
+        for candidate in candidates {
+            guard let candidate else { continue }
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                parts.append(trimmed)
             }
+        }
 
         guard !parts.isEmpty else { return nil }
         return parts.joined(separator: "\n\n")
