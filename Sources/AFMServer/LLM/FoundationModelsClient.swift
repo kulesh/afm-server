@@ -1,6 +1,12 @@
 import Foundation
 import FoundationModels
 
+struct CompletionGenerationResult: Sendable {
+    let content: String?
+    let toolCalls: [AssistantToolCall]
+    let finishReason: String
+}
+
 actor FoundationModelsClient {
     private var session: LanguageModelSession?
     private var currentInstructions: String?
@@ -35,6 +41,43 @@ actor FoundationModelsClient {
         } catch {
             return "Error: \(error.localizedDescription)"
         }
+    }
+
+    // MARK: - Tool-Aware Generation
+
+    func generateCompletion(request: ChatCompletionRequest) async throws -> CompletionGenerationResult {
+        let config = GenerationConfig(from: request)
+        let hasToolMessages = request.messages.contains { $0.role == "tool" }
+        let toolSelection = try ToolRegistry.shared.selectTools(
+            requestedDefinitions: request.tools ?? [],
+            toolChoice: request.toolChoice
+        )
+
+        if toolSelection.runtimeTools.isEmpty {
+            let content = await generateResponse(messages: request.messages, config: config)
+            return CompletionGenerationResult(content: content, toolCalls: [], finishReason: "stop")
+        }
+
+        let instructions = combineInstructions(
+            systemPrompt: config.systemPrompt,
+            toolInstructions: toolSelection.instructions
+        )
+        let toolSession = LanguageModelSession(
+            model: .default,
+            tools: toolSelection.runtimeTools,
+            instructions: instructions
+        )
+
+        let prompt = buildPrompt(from: request.messages, excludeSystem: config.systemPrompt != nil)
+        let options = buildGenerationOptions(from: config)
+        let response = try await toolSession.respond(to: prompt, options: options)
+
+        let toolCalls = extractToolCalls(from: response.transcriptEntries)
+        if !toolCalls.isEmpty && !hasToolMessages {
+            return CompletionGenerationResult(content: nil, toolCalls: toolCalls, finishReason: "tool_calls")
+        }
+
+        return CompletionGenerationResult(content: response.content, toolCalls: toolCalls, finishReason: "stop")
     }
 
     // MARK: - Streaming Generation
@@ -102,19 +145,67 @@ actor FoundationModelsClient {
         )
     }
 
+    private func combineInstructions(systemPrompt: String?, toolInstructions: String?) -> String? {
+        let parts = [systemPrompt, toolInstructions]
+            .compactMap { value in
+                guard let value else { return nil }
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: "\n\n")
+    }
+
+    private func extractToolCalls(from entries: ArraySlice<Transcript.Entry>) -> [AssistantToolCall] {
+        var calls: [AssistantToolCall] = []
+
+        for entry in entries {
+            guard case .toolCalls(let toolCalls) = entry else { continue }
+            for call in toolCalls {
+                calls.append(
+                    AssistantToolCall(
+                        id: call.id,
+                        function: ToolCallFunction(
+                            name: call.toolName,
+                            arguments: call.arguments.jsonString
+                        )
+                    )
+                )
+            }
+        }
+
+        return calls
+    }
+
     private func buildPrompt(from messages: [ChatMessage], excludeSystem: Bool = false) -> String {
         var prompt = ""
         for message in messages {
-            guard let content = message.content else { continue }
             if excludeSystem && message.role == "system" { continue }
+
             switch message.role {
             case "system":
+                guard let content = message.content else { continue }
                 prompt += "System: \(content)\n\n"
             case "user":
+                guard let content = message.content else { continue }
                 prompt += "User: \(content)\n\n"
             case "assistant":
-                prompt += "Assistant: \(content)\n\n"
+                if let toolCalls = message.toolCalls, !toolCalls.isEmpty {
+                    for call in toolCalls {
+                        prompt += "AssistantToolCall[\(call.id)] \(call.function.name): \(call.function.arguments)\n"
+                    }
+                    prompt += "\n"
+                }
+                if let content = message.content {
+                    prompt += "Assistant: \(content)\n\n"
+                }
+            case "tool":
+                let nameOrId = message.name ?? message.toolCallId ?? "tool"
+                let content = message.content ?? ""
+                prompt += "Tool[\(nameOrId)]: \(content)\n\n"
             default:
+                guard let content = message.content else { continue }
                 prompt += "\(content)\n\n"
             }
         }

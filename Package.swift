@@ -10,6 +10,10 @@ let package = Package(
         .executable(name: "afm-server", targets: ["AFMServer"])
     ],
     targets: [
-        .executableTarget(name: "AFMServer")
+        .executableTarget(name: "AFMServer"),
+        .testTarget(
+            name: "AFMServerTests",
+            dependencies: ["AFMServer"]
+        )
     ]
 )

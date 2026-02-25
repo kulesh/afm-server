@@ -102,6 +102,14 @@ class ServerManager: ObservableObject {
             }
             return .error(500, "Failed to encode response")
 
+        case ("GET", "/v1/tools"):
+            let tools = ToolRegistry.shared.availableTools()
+            if let data = try? JSONEncoder().encode(["data": tools]),
+               let json = String(data: data, encoding: .utf8) {
+                return .ok(json: json)
+            }
+            return .error(500, "Failed to encode response")
+
         case ("POST", "/v1/chat/completions"):
             return await handleChatCompletion(request, llmClient: llmClient)
 
@@ -117,16 +125,35 @@ class ServerManager: ObservableObject {
         }
 
         let config = GenerationConfig(from: chatRequest)
+        let isStreaming = chatRequest.stream == true
+        let requestedTools = chatRequest.tools ?? []
+        let messages = chatRequest.messages
 
-        // Check for streaming
-        if chatRequest.stream == true {
-            return await buildStreamingResponse(messages: chatRequest.messages, config: config, llmClient: llmClient)
+        if isStreaming {
+            if !requestedTools.isEmpty {
+                return .error(400, "Streaming tool_call responses are not supported.")
+            }
+            return await buildStreamingResponse(messages: messages, config: config, llmClient: llmClient)
         }
 
-        // Generate response
-        let responseText = await llmClient.generateResponse(messages: chatRequest.messages, config: config)
+        let completion: CompletionGenerationResult
+        do {
+            completion = try await llmClient.generateCompletion(request: chatRequest)
+        } catch let error as ToolingError {
+            return .error(400, error.localizedDescription)
+        } catch {
+            return .error(500, "Generation failed: \(error.localizedDescription)")
+        }
 
-        // Non-streaming response
+        let assistantMessage = ChatMessage(
+            role: "assistant",
+            content: completion.content,
+            toolCalls: completion.toolCalls.isEmpty ? nil : completion.toolCalls
+        )
+        let completionPayloadLength = completion.content?.count ?? completion.toolCalls.reduce(0) {
+            $0 + $1.function.arguments.count + $1.function.name.count
+        }
+
         let chatResponse = ChatCompletionResponse(
             id: "chatcmpl-\(UUID().uuidString.prefix(8))",
             object: "chat.completion",
@@ -135,14 +162,14 @@ class ServerManager: ObservableObject {
             choices: [
                 ChatChoice(
                     index: 0,
-                    message: ChatMessage(role: "assistant", content: responseText),
-                    finishReason: "stop"
+                    message: assistantMessage,
+                    finishReason: completion.finishReason
                 )
             ],
             usage: UsageInfo(
-                promptTokens: chatRequest.messages.reduce(0) { $0 + ($1.content?.count ?? 0) / 4 },
-                completionTokens: responseText.count / 4,
-                totalTokens: (chatRequest.messages.reduce(0) { $0 + ($1.content?.count ?? 0) } + responseText.count) / 4
+                promptTokens: messages.reduce(0) { $0 + ($1.content?.count ?? 0) / 4 },
+                completionTokens: completionPayloadLength / 4,
+                totalTokens: (messages.reduce(0) { $0 + ($1.content?.count ?? 0) } + completionPayloadLength) / 4
             )
         )
 
@@ -191,7 +218,6 @@ class ServerManager: ObservableObject {
             return .error(500, "Streaming error: \(error.localizedDescription)")
         }
 
-        // Final chunk
         let finalChunk = ChatCompletionChunk(
             id: responseId,
             object: "chat.completion.chunk",
